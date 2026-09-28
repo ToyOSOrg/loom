@@ -111,12 +111,14 @@ pub(super) struct State {
     /// access to the cell.
     is_mutating: bool,
 
-    /// Last time the atomic was accessed. This tracks the dependent access for
-    /// the DPOR algorithm.
-    last_access: Option<Access>,
-
     /// Last time the atomic was accessed for a store or rmw operation.
     last_non_load_access: Option<Access>,
+
+    /// Last time each thread loaded from the atomic since
+    /// `last_non_load_access`, indexed by thread. Loads are not dependent on
+    /// each other, so a store or rmw is dependent on every one of them and not
+    /// only on the most recent.
+    last_loads: [Option<Access>; MAX_THREADS],
 
     /// Currently tracked stored values. This is the `MAX_ATOMIC_HISTORY` most
     /// recent stores to the atomic cell in loom execution order.
@@ -411,8 +413,8 @@ impl State {
             unsync_mut_at: VersionVec::new(),
             unsync_mut_locations: LocationSet::new(),
             is_mutating: false,
-            last_access: None,
             last_non_load_access: None,
+            last_loads: Default::default(),
             stores: Default::default(),
             cnt: 0,
         };
@@ -825,24 +827,37 @@ impl State {
         one.iter_mut().chain(two.iter_mut())
     }
 
-    /// Returns the last dependent access
-    pub(super) fn last_dependent_access(&self, action: Action) -> Option<&Access> {
+    /// Returns the last dependent store or rmw access
+    pub(super) fn last_dependent_access(&self) -> Option<&Access> {
+        self.last_non_load_access.as_ref()
+    }
+
+    /// Returns the loads `action` is dependent on besides the last store or
+    /// rmw: none for a load, every thread's last load for a store or rmw.
+    pub(super) fn dependent_loads(&self, action: Action) -> &[Option<Access>] {
         match action {
-            Action::Load => self.last_non_load_access.as_ref(),
-            _ => self.last_access.as_ref(),
+            Action::Load => &[],
+            _ => &self.last_loads,
         }
     }
 
     /// Sets the last dependent access
-    pub(super) fn set_last_access(&mut self, action: Action, path_id: usize, version: &VersionVec) {
-        // Always set `last_access`
-        Access::set_or_create(&mut self.last_access, path_id, version);
-
+    pub(super) fn set_last_access(
+        &mut self,
+        action: Action,
+        thread_id: thread::Id,
+        path_id: usize,
+        version: &VersionVec,
+    ) {
         match action {
-            Action::Load => {}
+            Action::Load => {
+                Access::set_or_create(&mut self.last_loads[thread_id.as_usize()], path_id, version)
+            }
             _ => {
-                // Stores / RMWs
+                // Stores / RMWs. The loads since the previous one happen
+                // before this access, so later accesses need only depend on it.
                 Access::set_or_create(&mut self.last_non_load_access, path_id, version);
+                self.last_loads = Default::default();
             }
         }
     }

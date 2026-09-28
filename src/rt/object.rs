@@ -1,5 +1,5 @@
 use crate::rt;
-use crate::rt::{Access, Execution, Location, VersionVec};
+use crate::rt::{thread, Access, Execution, Location, VersionVec};
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -208,10 +208,23 @@ impl<T> Store<T> {
 }
 
 impl Store {
-    pub(super) fn last_dependent_access(&self, operation: Operation) -> Option<&Access> {
+    /// Returns the accesses `operation` is dependent on. Every other access it
+    /// is dependent on happens before one of these.
+    pub(super) fn dependent_accesses(&self, operation: Operation) -> impl Iterator<Item = &Access> {
+        let loads = match &self.entries[operation.obj.index] {
+            Entry::Atomic(entry) => entry.dependent_loads(operation.action.into()),
+            _ => &[],
+        };
+
+        self.last_dependent_access(operation)
+            .into_iter()
+            .chain(loads.iter().flatten())
+    }
+
+    fn last_dependent_access(&self, operation: Operation) -> Option<&Access> {
         match &self.entries[operation.obj.index] {
             Entry::Arc(entry) => entry.last_dependent_access(operation.action.into()),
-            Entry::Atomic(entry) => entry.last_dependent_access(operation.action.into()),
+            Entry::Atomic(entry) => entry.last_dependent_access(),
             Entry::Mutex(entry) => entry.last_dependent_access(),
             Entry::Condvar(entry) => entry.last_dependent_access(),
             Entry::Notify(entry) => entry.last_dependent_access(),
@@ -227,13 +240,14 @@ impl Store {
     pub(super) fn set_last_access(
         &mut self,
         operation: Operation,
+        thread_id: thread::Id,
         path_id: usize,
         dpor_vv: &VersionVec,
     ) {
         match &mut self.entries[operation.obj.index] {
             Entry::Arc(entry) => entry.set_last_access(operation.action.into(), path_id, dpor_vv),
             Entry::Atomic(entry) => {
-                entry.set_last_access(operation.action.into(), path_id, dpor_vv)
+                entry.set_last_access(operation.action.into(), thread_id, path_id, dpor_vv)
             }
             Entry::Mutex(entry) => entry.set_last_access(path_id, dpor_vv),
             Entry::Condvar(entry) => entry.set_last_access(path_id, dpor_vv),

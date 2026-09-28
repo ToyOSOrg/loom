@@ -3,8 +3,9 @@
 use loom::sync::atomic::AtomicUsize;
 use loom::thread;
 
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+use std::sync::{Arc, Mutex};
 
 loom::lazy_static! {
     static ref A: AtomicUsize = AtomicUsize::new(0);
@@ -122,4 +123,48 @@ fn fetch_add_atomic() {
 
         assert_ne!(v1, v2);
     });
+}
+
+// The store must be explored before the other thread's load, even though the
+// storing thread's own load of the atomic comes between them.
+#[test]
+fn store_races_with_load_of_other_thread() {
+    let values = Arc::new(Mutex::new(HashSet::new()));
+    let values_ = values.clone();
+    loom::model(move || {
+        let a1 = Arc::new(AtomicUsize::new(0));
+        let a2 = a1.clone();
+
+        let th = thread::spawn(move || {
+            let v = a2.load(SeqCst);
+            a2.store(v + 1, SeqCst);
+        });
+
+        values.lock().unwrap().insert(a1.load(SeqCst));
+
+        th.join().unwrap();
+    });
+    assert_eq!(*values_.lock().unwrap(), HashSet::from([0, 1]));
+}
+
+// The same for a read-modify-write.
+#[test]
+fn rmw_races_with_load_of_other_thread() {
+    let values = Arc::new(Mutex::new(HashSet::new()));
+    let values_ = values.clone();
+    loom::model(move || {
+        let a1 = Arc::new(AtomicUsize::new(0));
+        let a2 = a1.clone();
+
+        let th = thread::spawn(move || {
+            a2.load(SeqCst);
+            a2.fetch_add(1, SeqCst);
+            a2.fetch_add(1, SeqCst);
+        });
+
+        values.lock().unwrap().insert(a1.load(SeqCst));
+
+        th.join().unwrap();
+    });
+    assert_eq!(*values_.lock().unwrap(), HashSet::from([0, 1, 2]));
 }
