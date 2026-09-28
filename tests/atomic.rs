@@ -168,3 +168,27 @@ fn rmw_races_with_load_of_other_thread() {
     });
     assert_eq!(*values_.lock().unwrap(), HashSet::from([0, 1, 2]));
 }
+
+// A read-modify-write that races with a store and a later load of another
+// thread must be explored between the two: the backtracking point is the most
+// recent racing access, not the earliest.
+#[test]
+fn rmw_races_with_latest_access_of_other_thread() {
+    let values = Arc::new(Mutex::new(HashSet::new()));
+    let values_ = values.clone();
+    loom::model(move || {
+        let a1 = Arc::new(AtomicUsize::new(0));
+        let a2 = a1.clone();
+
+        let th = thread::spawn(move || {
+            a2.store(2, SeqCst);
+            a2.load(SeqCst)
+        });
+
+        let old = a1.fetch_add(1, SeqCst);
+        let seen = th.join().unwrap();
+
+        values.lock().unwrap().insert((old, seen));
+    });
+    assert!(values_.lock().unwrap().contains(&(2, 3)));
+}
