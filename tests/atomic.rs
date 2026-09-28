@@ -192,3 +192,29 @@ fn rmw_races_with_latest_access_of_other_thread() {
     });
     assert!(values_.lock().unwrap().contains(&(2, 3)));
 }
+
+// A store that races with loads of two other threads must be explored before
+// the more recent of them, whichever thread made it.
+#[test]
+fn store_races_with_latest_load_of_any_thread() {
+    let values = Arc::new(Mutex::new(HashSet::new()));
+    let values_ = values.clone();
+    loom::model(move || {
+        let a1 = Arc::new(AtomicUsize::new(0));
+        let a2 = a1.clone();
+        let a3 = a1.clone();
+
+        let th1 = thread::spawn(move || a2.load(SeqCst));
+        let th2 = thread::spawn(move || {
+            a3.store(2, SeqCst);
+            a3.store(1, SeqCst);
+        });
+
+        let v0 = a1.load(SeqCst);
+        let v1 = th1.join().unwrap();
+        th2.join().unwrap();
+
+        values.lock().unwrap().insert((v0, v1));
+    });
+    assert!(values_.lock().unwrap().contains(&(1, 2)));
+}
